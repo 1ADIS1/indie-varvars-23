@@ -7,16 +7,30 @@ use parry2d::{
 
 pub const PLAYER_MOVEMENT_SPEED: f32 = 200.;
 
-pub const PLANET_SIZE: Vec2 = Vec2::new(400., 400.);
+pub const PLANET_SIZE: Vec2 = Vec2::new(715., 715.);
 pub const PLANET_ROTATION_SPEED: f32 = 1.;
 pub const PLANET_SHRINK_SPEED: f32 = 50.; // b: 15.
-pub const PLANET_SHRINK_LIMIT: Vec2 = Vec2::new(80., 80.);
+pub const PLANET_SHRINK_LIMIT: Vec2 = Vec2::new(200., 200.);
 
-pub const PLAYER_JUMP_STRENGTH: f32 = 200.;
-pub const GRAVITY_STRENGTH: f32 = 150.;
+pub const PLAYER_JUMP_STRENGTH: f32 = 100.;
+pub const GRAVITY_STRENGTH: f32 = 250.;
 
 pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
 pub const OBSTACLE_MOVEMENT_SPEED: f32 = 100.;
+
+// /// Used to load assets when the game starts.
+// #[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
+// pub enum LoadingState {
+//     #[default]
+//     Planet,
+//     Obstacles,
+//     None,
+// }
+
+#[derive(Resource, Default)]
+struct GameManager {
+    is_obstacles_spawned: bool,
+}
 
 #[derive(Component)]
 struct Player {
@@ -44,11 +58,12 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_event::<PlanetSpawnEvent>()
+        .init_resource::<GameManager>()
         .add_systems(Startup, (spawn_2d_camera, start_game, spawn_player))
         .add_systems(
             Update,
             (
-                spawn_planet,
+                spawn_planet.after(shrink_current_planet),
                 spawn_obstacles.after(spawn_planet),
                 rotate_planets,
                 shrink_current_planet,
@@ -62,7 +77,15 @@ fn main() {
 }
 
 fn spawn_2d_camera(mut commands: Commands) {
-    commands.spawn(Camera2dBundle { ..default() });
+    commands.spawn(Camera2dBundle {
+        projection: OrthographicProjection {
+            far: 1000.,
+            near: -1000.,
+            scale: 1.5,
+            ..default()
+        },
+        ..default()
+    });
 }
 
 fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
@@ -81,6 +104,8 @@ fn spawn_planet(
         let mut new_planet_position = planet_spawn_event.last_planet_position;
         new_planet_position.y -= PLANET_SIZE.y * 2.;
 
+        println!("New planet position: {}", new_planet_position);
+
         // Create planet collider
         let planet_radius = PLANET_SIZE.y / 2.0;
         let collider_shape = Ball::new(planet_radius);
@@ -88,7 +113,7 @@ fn spawn_planet(
         commands.spawn((
             SpriteBundle {
                 transform: Transform::from_translation(new_planet_position),
-                texture: asset_server.load("art/ball.png"),
+                texture: asset_server.load("art/Earth.png"),
                 sprite: Sprite {
                     custom_size: Some(PLANET_SIZE),
                     ..default()
@@ -101,11 +126,11 @@ fn spawn_planet(
             },
         ));
 
+        println!("Planet has spawned!");
+
         if let Ok(mut camera_transform) = camera_query.get_single_mut() {
             camera_transform.translation = new_planet_position;
         }
-
-        println!("Planet has spawned!");
     }
 }
 
@@ -117,6 +142,7 @@ fn rotate_planets(mut planets_query: Query<&mut Transform, With<Planet>>, time: 
 
 fn shrink_current_planet(
     mut commands: Commands,
+    mut game_manager: ResMut<GameManager>,
     mut planets_query: Query<(&mut Sprite, Entity, &mut Collider, &Transform), With<Planet>>,
     mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>,
     time: Res<Time>,
@@ -129,10 +155,16 @@ fn shrink_current_planet(
         planet_sprite.custom_size = Some(new_planet_size);
 
         if new_planet_size.distance(PLANET_SHRINK_LIMIT) < 1. {
+            // When despawning this entity, other sprites are also despawning for some fucking weird reason.
+            commands.entity(planet_entity).despawn_recursive();
+
+            println!("Planet's last position: {}", transform.translation);
+
             planet_spawn_event_writer.send(PlanetSpawnEvent {
                 last_planet_position: transform.translation,
             });
-            commands.entity(planet_entity).despawn();
+
+            game_manager.is_obstacles_spawned = false;
         }
     }
 }
@@ -147,7 +179,7 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
                 color: Color::GREEN,
                 ..default()
             },
-            transform: Transform::from_xyz(0., 256., 10.),
+            transform: Transform::from_xyz(0., PLANET_SIZE.y / 2. + 256., 0.),
             ..default()
         },
         Player { is_jumping: false },
@@ -163,12 +195,14 @@ fn player_jump(
     time: Res<Time>,
 ) {
     if let Ok((mut player_transform, mut player_struct)) = player_query.get_single_mut() {
-        if keyboard_input.pressed(KeyCode::Space) {
-            player_transform.translation.y += PLAYER_JUMP_STRENGTH * time.delta_seconds();
+        if keyboard_input.just_pressed(KeyCode::Space) {
+            player_transform.translation.y += PLAYER_JUMP_STRENGTH;
             // player_struct.is_jumping = true;
         }
     }
 }
+
+// TODO: change player velocity
 
 fn apply_gravity_on_player(mut player_query: Query<&mut Transform, With<Player>>, time: Res<Time>) {
     if let Ok(mut player_transform) = player_query.get_single_mut() {
@@ -238,58 +272,41 @@ fn check_player_planet_collisions(
     }
 }
 
+// When the new planet appears, it is filled with new obstacles only once.
 fn spawn_obstacles(
-    mut planet_spawn_event_reader: EventReader<PlanetSpawnEvent>,
+    mut game_manager: ResMut<GameManager>,
     mut commands: Commands,
+    planet_query: Query<Entity, With<Planet>>,
     asset_server: Res<AssetServer>,
 ) {
-    for planet_spawn_event in planet_spawn_event_reader.iter() {
+    if game_manager.is_obstacles_spawned {
+        return;
+    }
+
+    if let Ok(planet_entity) = planet_query.get_single() {
         let obstacle_position = Vec3::new(0., -(PLANET_SIZE.y + OBSTACLE_SIZE.y) / 2., 0.);
 
-        commands.spawn((
-            SpriteBundle {
-                transform: Transform::from_translation(obstacle_position),
-                texture: asset_server.load("art/ball.png"),
-                sprite: Sprite {
-                    color: Color::ORANGE,
-                    custom_size: Some(OBSTACLE_SIZE),
+        commands.entity(planet_entity).with_children(|parent| {
+            parent.spawn((
+                SpriteBundle {
+                    transform: Transform::from_translation(obstacle_position),
+                    texture: asset_server.load("art/ball.png"),
+                    sprite: Sprite {
+                        color: Color::ORANGE,
+                        custom_size: Some(OBSTACLE_SIZE),
+                        ..default()
+                    },
                     ..default()
                 },
-                ..default()
-            },
-            Collider {
-                shape: Ball::new(OBSTACLE_SIZE.y / 2.),
-            },
-            Obstacle,
-        ));
+                Collider {
+                    shape: Ball::new(OBSTACLE_SIZE.y / 2.),
+                },
+                Obstacle,
+            ));
+        });
+
+        game_manager.is_obstacles_spawned = true;
 
         println!("Obstacles have spawned!");
     }
 }
-
-// /// Handles the player movement each frame by updating it's **transform** component.
-// fn move_player(
-//     mut player_query: Query<&mut Transform, With<Player>>,
-//     keyboard_input: Res<Input<KeyCode>>,
-//     time: Res<Time>,
-// ) {
-//     if let Ok(mut player_transform) = player_query.get_single_mut() {
-//         let mut direction = Vec3::ZERO;
-
-//         if keyboard_input.pressed(KeyCode::A) {
-//             direction.x -= 1.;
-//         }
-//         if keyboard_input.pressed(KeyCode::D) {
-//             direction.x += 1.;
-//         }
-//         if keyboard_input.pressed(KeyCode::W) {
-//             direction.y += 1.;
-//         }
-//         if keyboard_input.pressed(KeyCode::S) {
-//             direction.y -= 1.;
-//         }
-
-//         let direction = direction.normalize_or_zero();
-//         player_transform.translation += direction * PLAYER_MOVEMENT_SPEED * time.delta_seconds();
-//     }
-// }
