@@ -4,6 +4,7 @@ use parry2d::{
     query::contact,
     shape::{Ball, Shape},
 };
+use rand::Rng;
 
 pub const PLAYER_MOVEMENT_SPEED: f32 = 200.;
 
@@ -12,11 +13,12 @@ pub const PLANET_ROTATION_SPEED: f32 = 1.;
 pub const PLANET_SHRINK_SPEED: f32 = 50.; // b: 15.
 pub const PLANET_SHRINK_LIMIT: Vec2 = Vec2::new(200., 200.);
 
-pub const PLAYER_JUMP_STRENGTH: f32 = 100.;
-pub const GRAVITY_STRENGTH: f32 = 250.;
+pub const PLAYER_JUMP_STRENGTH: f32 = 450.;
+pub const GRAVITY_STRENGTH: f32 = -27.43;
+pub const PLAYER_FALL_ACCELERATION: f32 = -3000.;
 
 pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
-pub const OBSTACLE_MOVEMENT_SPEED: f32 = 100.;
+pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
 
 /// Resource for tracking loading assets.
 #[derive(Resource, Default)]
@@ -32,15 +34,20 @@ pub enum LoadingState {
 
 #[derive(Component)]
 struct Player {
-    pub is_jumping: bool,
+    pub is_grounded: bool,
+    velocity: f32,
 }
 
 #[derive(Component)]
-struct Obstacle;
+struct Obstacle {
+    angle: f32,
+}
 
 #[derive(Component)]
 struct Planet {
     is_playing: bool,
+    obstacles: Vec<Entity>,
+    radius: f32,
 }
 
 /// Abstraction of the parry2d shapes to store in the component.
@@ -68,10 +75,11 @@ fn main() {
                 rotate_planets,
                 shrink_current_planet,
                 player_jump,
-                apply_gravity_on_player,
+                // apply_gravity_on_player,
                 show_gizmos,
                 check_player_planet_collisions,
                 move_obstacles_on_planet,
+                check_player_obstacle_collisions,
             ),
         )
         .add_systems(
@@ -127,7 +135,11 @@ fn spawn_planet(
                 },
                 ..default()
             },
-            Planet { is_playing: false },
+            Planet {
+                is_playing: false,
+                obstacles: Vec::new(),
+                radius: PLANET_SIZE.y / 2.,
+            },
             Collider {
                 shape: collider_shape,
             },
@@ -171,12 +183,12 @@ fn rotate_planets(mut planets_query: Query<(&mut Transform, &Planet)>, time: Res
 // TODO: current
 fn shrink_current_planet(
     mut commands: Commands,
-    mut planets_query: Query<(&mut Sprite, Entity, &mut Collider, &Transform, &Planet)>,
+    mut planets_query: Query<(&mut Sprite, Entity, &mut Collider, &Transform, &mut Planet)>,
     mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>,
     mut next_loading_state: ResMut<NextState<LoadingState>>,
     time: Res<Time>,
 ) {
-    for (mut planet_sprite, planet_entity, mut collider, transform, planet_struct) in
+    for (mut planet_sprite, planet_entity, mut collider, transform, mut planet_struct) in
         planets_query.iter_mut()
     {
         if !planet_struct.is_playing {
@@ -185,12 +197,18 @@ fn shrink_current_planet(
 
         let new_planet_size =
             planet_sprite.custom_size.unwrap() - PLANET_SHRINK_SPEED * time.delta_seconds();
+
         collider.shape.radius -= PLANET_SHRINK_SPEED / 2.0 * time.delta_seconds();
+
+        planet_struct.radius = collider.shape.radius;
 
         planet_sprite.custom_size = Some(new_planet_size);
 
         if new_planet_size.distance(PLANET_SHRINK_LIMIT) < 1. {
             // When despawning this entity, other sprites are also despawning for some fucking weird reason.
+            for &obstacle_entity in planet_struct.obstacles.iter() {
+                commands.entity(obstacle_entity).despawn_recursive();
+            }
             commands.entity(planet_entity).despawn_recursive();
 
             next_loading_state.set(LoadingState::Planet);
@@ -215,32 +233,42 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
             transform: Transform::from_xyz(0., PLANET_SIZE.y / 2. + 256., 0.),
             ..default()
         },
-        Player { is_jumping: false },
+        Player {
+            is_grounded: false,
+            velocity: 0.,
+        },
         Collider {
             shape: collider_shape,
         },
     ));
 }
 
-// TODO: velocity
 fn player_jump(
     mut player_query: Query<(&mut Transform, &mut Player)>,
     keyboard_input: Res<Input<KeyCode>>,
     time: Res<Time>,
 ) {
     if let Ok((mut player_transform, mut player_struct)) = player_query.get_single_mut() {
-        if keyboard_input.just_pressed(KeyCode::Space) {
-            player_transform.translation.y += PLAYER_JUMP_STRENGTH;
-            // player_struct.is_jumping = true;
+        player_struct.velocity += GRAVITY_STRENGTH * GRAVITY_STRENGTH.abs() * time.delta_seconds();
+
+        if keyboard_input.just_pressed(KeyCode::Space) && player_struct.is_grounded {
+            player_struct.velocity = PLAYER_JUMP_STRENGTH;
         }
+
+        // accelerate fall
+        if keyboard_input.pressed(KeyCode::S) && !player_struct.is_grounded {
+            player_struct.velocity += PLAYER_FALL_ACCELERATION * time.delta_seconds();
+        }
+
+        player_transform.translation.y += player_struct.velocity * time.delta_seconds();
     }
 }
 
-fn apply_gravity_on_player(mut player_query: Query<&mut Transform, With<Player>>, time: Res<Time>) {
-    if let Ok(mut player_transform) = player_query.get_single_mut() {
-        player_transform.translation.y -= GRAVITY_STRENGTH * time.delta_seconds();
-    }
-}
+// fn apply_gravity_on_player(mut player_query: Query<&mut Transform, With<Player>>, time: Res<Time>) {
+//     if let Ok(mut player_transform) = player_query.get_single_mut() {
+//         player_transform.translation.y -= GRAVITY_STRENGTH * time.delta_seconds();
+//     }
+// }
 
 /// When pressing G - renders all gizmos.
 pub fn show_gizmos(
@@ -261,10 +289,10 @@ pub fn show_gizmos(
 }
 
 fn check_player_planet_collisions(
-    mut player_query: Query<(&Collider, &mut Transform), (With<Player>, Without<Planet>)>,
+    mut player_query: Query<(&Collider, &mut Transform, &mut Player), Without<Planet>>,
     mut planet_query: Query<(&Collider, &Transform, &mut Planet)>,
 ) {
-    for (player_collider, mut player_transform) in player_query.iter_mut() {
+    for (player_collider, mut player_transform, mut player_struct) in player_query.iter_mut() {
         for (planet_collider, planet_transform, mut planet_struct) in planet_query.iter_mut() {
             let mut player_translation = player_transform.translation;
 
@@ -281,7 +309,7 @@ fn check_player_planet_collisions(
             let tile_shape = planet_collider.shape.clone_box();
 
             // Distance between objects to collide
-            let distance = 0.0;
+            let distance = 1.;
             let collision = contact(
                 &actor_isometry,
                 &*actor_shape,
@@ -298,7 +326,10 @@ fn check_player_planet_collisions(
                 player_translation.x += contact.dist * normal.x;
                 player_translation.y += contact.dist * normal.y;
 
+                player_struct.is_grounded = true;
                 planet_struct.is_playing = true;
+            } else {
+                player_struct.is_grounded = false;
             }
 
             player_transform.translation = player_translation;
@@ -306,59 +337,132 @@ fn check_player_planet_collisions(
     }
 }
 
-// When the new planet appears, it is filled with new obstacles only once.
+fn check_player_obstacle_collisions(
+    mut player_query: Query<(&Collider, &mut Transform), (With<Player>, Without<Obstacle>)>,
+    mut obstacle_query: Query<(&Collider, &Transform), With<Obstacle>>,
+) {
+    for (player_collider, player_transform) in player_query.iter_mut() {
+        for (obstacle_collider, obstacle_transform) in obstacle_query.iter_mut() {
+            let actor_isometry = Isometry::translation(
+                player_transform.translation.x,
+                player_transform.translation.y,
+            );
+            let tile_isometry = Isometry::translation(
+                obstacle_transform.translation.x,
+                obstacle_transform.translation.y,
+            );
+
+            let actor_shape = player_collider.shape.clone_box();
+            let tile_shape = obstacle_collider.shape.clone_box();
+
+            // Distance between objects to collide
+            let distance = 0.0;
+            let collision = contact(
+                &actor_isometry,
+                &*actor_shape,
+                &tile_isometry,
+                &*tile_shape,
+                distance,
+            )
+            .unwrap();
+
+            // If objects collided
+            // TODO: player death
+            // if let Some(_) = collision {
+            //     println!("Game Over!");
+            // }
+        }
+    }
+}
+
+// When the new planet appears, it is filled with new obstacles.
 fn spawn_obstacles(
     mut commands: Commands,
-    planet_query: Query<Entity, With<Planet>>,
+    mut planet_query: Query<(&Transform, &mut Planet)>,
     asset_server: Res<AssetServer>,
 ) {
-    if let Ok(planet_entity) = planet_query.get_single() {
-        let obstacle_position = Vec3::new(0., -(PLANET_SIZE.y + OBSTACLE_SIZE.y) / 2., 0.);
+    println!(
+        "Num of planets when spawning obstacles: {}",
+        planet_query.iter().len()
+    );
 
-        commands.entity(planet_entity).with_children(|parent| {
-            parent.spawn((
-                SpriteBundle {
-                    transform: Transform::from_translation(obstacle_position),
-                    texture: asset_server.load("art/ball.png"),
-                    sprite: Sprite {
-                        color: Color::ORANGE,
-                        custom_size: Some(OBSTACLE_SIZE),
-                        ..default()
-                    },
-                    ..default()
-                },
-                Collider {
-                    shape: Ball::new(OBSTACLE_SIZE.y / 2.),
-                },
-                Obstacle,
-            ));
-        });
+    if let Ok((planet_transform, mut planet_struct)) = planet_query.get_single_mut() {
+        let mut rng = rand::thread_rng();
+        let obstacles_num = rng.gen_range(1..5);
+
+        for _ in 0..obstacles_num {
+            // Random position on the planet.
+            // TODO: make angle unique for each obstacle
+            let mut obstacle_position = Vec3::ZERO;
+            let angle = if rng.gen_bool(0.5) {
+                rng.gen_range(0f32..=45f32)
+            } else {
+                rng.gen_range(125f32..360f32)
+            };
+
+            let planet_radius = planet_struct.radius;
+            let obstacle_radius = OBSTACLE_SIZE.y / 2.;
+
+            obstacle_position.x =
+                planet_transform.translation.x + angle.cos() * (planet_radius + obstacle_radius);
+            obstacle_position.y =
+                planet_transform.translation.y + angle.sin() * (planet_radius + obstacle_radius);
+
+            planet_struct.obstacles.push(
+                commands
+                    .spawn((
+                        SpriteBundle {
+                            transform: Transform::from_translation(obstacle_position),
+                            texture: asset_server.load("art/ball.png"),
+                            sprite: Sprite {
+                                color: Color::ORANGE,
+                                custom_size: Some(OBSTACLE_SIZE),
+                                ..default()
+                            },
+                            ..default()
+                        },
+                        Collider {
+                            shape: Ball::new(OBSTACLE_SIZE.y / 2.),
+                        },
+                        Obstacle { angle },
+                    ))
+                    .id(),
+            );
+        }
 
         println!("Obstacles have spawned!");
     }
 }
 
-// TODO: enemy move faster than planet
 fn move_obstacles_on_planet(
-    mut children_query: Query<&mut Transform>,
-    planet_query: Query<(&Children, &Planet)>,
+    mut children_query: Query<(&mut Transform, &mut Obstacle)>,
+    planet_query: Query<(&Planet, &Transform), Without<Obstacle>>,
     time: Res<Time>,
 ) {
-    if let Ok((planet_children, planet_struct)) = planet_query.get_single() {
+    if let Ok((planet_struct, planet_transform)) = planet_query.get_single() {
         if !planet_struct.is_playing {
             return;
         }
 
-        for &child in planet_children.iter() {
+        let planet_translation = planet_transform.translation;
+        let planet_radius = planet_struct.radius;
+
+        for &child in planet_struct.obstacles.iter() {
             let child_query = children_query.get_mut(child);
 
-            if let Ok(mut child_query) = child_query {
-                let mut child_translation = child_query.translation;
+            if let Ok((mut transform, mut obstacle_struct)) = child_query {
+                let obstacle_radius = OBSTACLE_SIZE.y / 2.;
 
-                // child_translation.x -= 10.0 * time.delta_seconds();
-                child_translation.y += PLANET_SHRINK_SPEED / 2.0 * time.delta_seconds();
+                transform.translation.x = planet_translation.x
+                    + obstacle_struct.angle.cos() * (planet_radius + obstacle_radius);
+                transform.translation.y = planet_translation.y
+                    + obstacle_struct.angle.sin() * (planet_radius + obstacle_radius);
 
-                child_query.translation = child_translation;
+                obstacle_struct.angle -= time.delta_seconds() * OBSTACLE_MOVEMENT_SPEED;
+
+                if obstacle_struct.angle > 360. {
+                    obstacle_struct.angle = 0.;
+                }
             }
         }
     }
