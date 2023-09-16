@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use bevy::{asset::LoadState, prelude::*};
+use bevy_tweening::{lens::TransformPositionLens, *};
 use parry2d::{
     math::Isometry,
     query::contact,
@@ -7,18 +10,23 @@ use parry2d::{
 use rand::Rng;
 
 pub const PLAYER_MOVEMENT_SPEED: f32 = 200.;
+pub const PLAYER_JUMP_STRENGTH: f32 = 450.;
+pub const GRAVITY_STRENGTH: f32 = -27.43;
+pub const PLAYER_FALL_ACCELERATION: f32 = -3000.;
 
 pub const PLANET_SIZE: Vec2 = Vec2::new(715., 715.);
 pub const PLANET_ROTATION_SPEED: f32 = 1.;
 pub const PLANET_SHRINK_SPEED: f32 = 50.; // b: 15.
 pub const PLANET_SHRINK_LIMIT: Vec2 = Vec2::new(200., 200.);
 
-pub const PLAYER_JUMP_STRENGTH: f32 = 450.;
-pub const GRAVITY_STRENGTH: f32 = -27.43;
-pub const PLAYER_FALL_ACCELERATION: f32 = -3000.;
+pub const PLANET_FACE_SIZE: Vec2 = Vec2::new(715., 715.);
+pub const PLANET_FACE_NORMAL_THRESHOLD: f32 = 250.;
+pub const PLANET_FACE_BAD_THRESHOLD: f32 = 175.;
 
 pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
 pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
+
+pub const PLAYER_START_POSITION: Vec3 = Vec3::new(0., PLANET_SIZE.y, 0.);
 
 /// Resource for tracking loading assets.
 #[derive(Resource, Default)]
@@ -50,6 +58,11 @@ struct Planet {
     radius: f32,
 }
 
+#[derive(Component)]
+struct PlanetFace {
+    face: PlanetFaceState,
+}
+
 /// Abstraction of the parry2d shapes to store in the component.
 #[derive(Component, Clone)]
 pub struct Collider {
@@ -61,9 +74,16 @@ pub struct PlanetSpawnEvent {
     last_planet_position: Vec3,
 }
 
+pub enum PlanetFaceState {
+    Good,
+    Normal,
+    Bad,
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
+        .add_plugins(TweeningPlugin)
         .add_event::<PlanetSpawnEvent>()
         .add_state::<LoadingState>()
         .init_resource::<AssetsLoading>()
@@ -75,11 +95,11 @@ fn main() {
                 rotate_planets,
                 shrink_current_planet,
                 player_jump,
-                // apply_gravity_on_player,
                 show_gizmos,
-                check_player_planet_collisions,
+                check_player_planet_collisions.after(player_jump),
                 move_obstacles_on_planet,
                 check_player_obstacle_collisions,
+                manage_planet_face,
             ),
         )
         .add_systems(
@@ -91,15 +111,29 @@ fn main() {
 }
 
 fn spawn_2d_camera(mut commands: Commands) {
-    commands.spawn(Camera2dBundle {
-        projection: OrthographicProjection {
-            far: 1000.,
-            near: -1000.,
-            scale: 1.5,
+    let tween = Tween::new(
+        EaseFunction::QuadraticInOut,
+        Duration::from_secs(0),
+        TransformPositionLens {
+            start: Vec3::ZERO,
+            end: Vec3::ZERO,
+        },
+    );
+
+    commands.spawn((
+        Camera2dBundle {
+            transform: Transform::from_translation(PLAYER_START_POSITION),
+            projection: OrthographicProjection {
+                far: 1000.,
+                near: -1000.,
+                scale: 1.5,
+                ..default()
+            },
             ..default()
         },
-        ..default()
-    });
+        // Add an Animator component to control and execute the animation.
+        Animator::new(tween),
+    ));
 }
 
 fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
@@ -111,8 +145,9 @@ fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
 fn spawn_planet(
     mut planet_spawn_event_reader: EventReader<PlanetSpawnEvent>,
     mut commands: Commands,
-    mut camera_query: Query<&mut Transform, With<Camera>>,
+    mut camera_query: Query<(&Transform, &mut Animator<Transform>), With<Camera>>,
     mut loading: ResMut<AssetsLoading>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
     asset_server: Res<AssetServer>,
 ) {
     for planet_spawn_event in planet_spawn_event_reader.iter() {
@@ -125,30 +160,71 @@ fn spawn_planet(
         let planet_radius = PLANET_SIZE.y / 2.0;
         let collider_shape = Ball::new(planet_radius);
 
-        commands.spawn((
-            SpriteBundle {
-                transform: Transform::from_translation(new_planet_position),
-                texture: texture.clone(),
-                sprite: Sprite {
-                    custom_size: Some(PLANET_SIZE),
+        commands
+            .spawn((
+                SpriteBundle {
+                    transform: Transform::from_translation(new_planet_position),
+                    texture: texture.clone(),
+                    sprite: Sprite {
+                        custom_size: Some(PLANET_SIZE),
+                        ..default()
+                    },
                     ..default()
                 },
-                ..default()
-            },
-            Planet {
-                is_playing: false,
-                obstacles: Vec::new(),
-                radius: PLANET_SIZE.y / 2.,
-            },
-            Collider {
-                shape: collider_shape,
-            },
-        ));
+                Planet {
+                    is_playing: false,
+                    obstacles: Vec::new(),
+                    radius: PLANET_SIZE.y / 2.,
+                },
+                Collider {
+                    shape: collider_shape,
+                },
+            ))
+            .with_children(|parent| {
+                let face_spritesheet = asset_server.load("art/FaceAtlas.png");
+                let face_atlas =
+                    TextureAtlas::from_grid(face_spritesheet, PLANET_FACE_SIZE, 3, 1, None, None);
+                let texture_atlas_handle = texture_atlases.add(face_atlas);
+
+                parent.spawn((
+                    SpriteSheetBundle {
+                        sprite: TextureAtlasSprite {
+                            index: 0,
+                            custom_size: Some(PLANET_FACE_SIZE),
+                            ..default()
+                        },
+                        texture_atlas: texture_atlas_handle,
+                        transform: Transform::from_xyz(0., 0., 10.),
+                        ..default()
+                    },
+                    PlanetFace {
+                        face: PlanetFaceState::Good,
+                    },
+                ));
+            });
 
         loading.0.push(texture.clone_untyped());
 
-        if let Ok(mut camera_transform) = camera_query.get_single_mut() {
-            camera_transform.translation = new_planet_position;
+        // Tween camera position
+        if let Ok((camera_transform, mut camera_animator)) = camera_query.get_single_mut() {
+            // // camera_transform.translation = new_planet_position;
+            // Create a single animation (tween) to move an entity.
+            let tween = Tween::new(
+                // Use a quadratic easing on both endpoints.
+                EaseFunction::QuadraticInOut,
+                // Animation time (one way only; for ping-pong it takes 2 seconds
+                // to come back to start).
+                Duration::from_secs_f32(1.2),
+                // The lens gives the Animator access to the Transform component,
+                // to animate it. It also contains the start and end values associated
+                // with the animation ratios 0. and 1.
+                TransformPositionLens {
+                    start: camera_transform.translation,
+                    end: new_planet_position,
+                },
+            );
+
+            camera_animator.set_tweenable(tween);
         }
     }
 }
@@ -220,6 +296,33 @@ fn shrink_current_planet(
     }
 }
 
+// TODO:
+fn manage_planet_face(
+    planet_query: Query<&Planet>,
+    mut planet_face_query: Query<(&mut PlanetFace, &mut TextureAtlasSprite)>,
+    time: Res<Time>,
+) {
+    if let Ok(planet_struct) = planet_query.get_single() {
+        if let Ok((mut planet_face, mut face_atlas)) = planet_face_query.get_single_mut() {
+            if !planet_struct.is_playing {
+                return;
+            }
+
+            if planet_struct.radius < PLANET_FACE_NORMAL_THRESHOLD {
+                face_atlas.index = 1;
+                planet_face.face = PlanetFaceState::Normal;
+            }
+            if planet_struct.radius < PLANET_FACE_BAD_THRESHOLD {
+                face_atlas.index = 2;
+                planet_face.face = PlanetFaceState::Bad;
+            }
+
+            face_atlas.custom_size =
+                Some(face_atlas.custom_size.unwrap() - PLANET_SHRINK_SPEED * time.delta_seconds());
+        }
+    }
+}
+
 fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
     let collider_shape = Ball::new(32.);
 
@@ -230,7 +333,7 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
                 color: Color::GREEN,
                 ..default()
             },
-            transform: Transform::from_xyz(0., PLANET_SIZE.y / 2. + 256., 0.),
+            transform: Transform::from_translation(PLAYER_START_POSITION),
             ..default()
         },
         Player {
@@ -243,6 +346,7 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
+// TODO: players falls over the planet when pressing S.
 fn player_jump(
     mut player_query: Query<(&mut Transform, &mut Player)>,
     keyboard_input: Res<Input<KeyCode>>,
@@ -263,12 +367,6 @@ fn player_jump(
         player_transform.translation.y += player_struct.velocity * time.delta_seconds();
     }
 }
-
-// fn apply_gravity_on_player(mut player_query: Query<&mut Transform, With<Player>>, time: Res<Time>) {
-//     if let Ok(mut player_transform) = player_query.get_single_mut() {
-//         player_transform.translation.y -= GRAVITY_STRENGTH * time.delta_seconds();
-//     }
-// }
 
 /// When pressing G - renders all gizmos.
 pub fn show_gizmos(
@@ -368,9 +466,9 @@ fn check_player_obstacle_collisions(
 
             // If objects collided
             // TODO: player death
-            // if let Some(_) = collision {
-            //     println!("Game Over!");
-            // }
+            if let Some(_) = collision {
+                println!("Game Over!");
+            }
         }
     }
 }
@@ -392,7 +490,7 @@ fn spawn_obstacles(
 
         for _ in 0..obstacles_num {
             // Random position on the planet.
-            // TODO: make angle unique for each obstacle
+            // TODO: make angle unique for each obstacle and make more gaps btwn obstacles.
             let mut obstacle_position = Vec3::ZERO;
             let angle = if rng.gen_bool(0.5) {
                 rng.gen_range(0f32..=45f32)
