@@ -1,13 +1,17 @@
-use std::time::Duration;
+mod ui;
 
-use bevy::{asset::LoadState, prelude::*};
+use std::{f32::consts::*, time::Duration};
+
+use bevy::{asset::LoadState, prelude::*, window::PresentMode};
 use bevy_tweening::{lens::TransformPositionLens, *};
 use parry2d::{
     math::Isometry,
+    na::ComplexField,
     query::contact,
     shape::{Ball, Shape},
 };
 use rand::Rng;
+use ui::{ReplayButton, UIPlugin};
 
 pub const PLAYER_MOVEMENT_SPEED: f32 = 200.;
 pub const PLAYER_JUMP_STRENGTH: f32 = 450.;
@@ -25,6 +29,14 @@ pub const PLANET_FACE_BAD_THRESHOLD: f32 = 175.;
 
 pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
 pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
+// 20 degrees - 45 degrees
+pub const OBSTACLE_CLOSE_GAP_RANGE: (f32, f32) = (0., 0.261799);
+// 40 degrees - 80 degrees
+pub const OBSTACLE_LONG_GAP_RANGE: (f32, f32) = (0.698132, 1.39626);
+// 150 degrees
+pub const OBSTACLE_MAX_ANGLE_GENERATION: f32 = 2.61799;
+// 45 degrees
+pub const OBSTACLE_MIN_ANGLE_GENERATION: f32 = FRAC_PI_4;
 
 pub const PLAYER_START_POSITION: Vec3 = Vec3::new(0., PLANET_SIZE.y, 0.);
 
@@ -38,6 +50,13 @@ pub enum LoadingState {
     #[default]
     Planet,
     None,
+}
+
+#[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
+pub enum AppState {
+    #[default]
+    Playing,
+    GameOver,
 }
 
 #[derive(Component)]
@@ -82,12 +101,28 @@ pub enum PlanetFaceState {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Indie Varvar's 2023".into(),
+                resolution: (840., 750.).into(),
+                present_mode: PresentMode::AutoVsync,
+                // mode: WindowMode::BorderlessFullscreen,
+                // Tells wasm to resize the window according to the available canvas
+                fit_canvas_to_parent: true,
+                // Tells wasm not to override default event handling, like F5, Ctrl+R etc.
+                prevent_default_event_handling: true,
+                ..default()
+            }),
+            ..default()
+        }))
         .add_plugins(TweeningPlugin)
+        .add_plugins(UIPlugin)
         .add_event::<PlanetSpawnEvent>()
         .add_state::<LoadingState>()
+        .add_state::<AppState>()
         .init_resource::<AssetsLoading>()
-        .add_systems(Startup, (spawn_2d_camera, start_game, spawn_player))
+        .add_systems(Startup, spawn_2d_camera)
+        .add_systems(OnEnter(AppState::Playing), (start_game, spawn_player))
         .add_systems(
             Update,
             (
@@ -100,13 +135,15 @@ fn main() {
                 move_obstacles_on_planet,
                 check_player_obstacle_collisions,
                 manage_planet_face,
-            ),
+            )
+                .run_if(in_state(AppState::Playing)),
         )
         .add_systems(
             Update,
             check_planets_loading.run_if(in_state(LoadingState::Planet)),
         )
         .add_systems(OnExit(LoadingState::Planet), spawn_obstacles)
+        .add_systems(OnEnter(AppState::GameOver), restart_game)
         .run();
 }
 
@@ -140,6 +177,28 @@ fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
     planet_spawn_event_writer.send(PlanetSpawnEvent {
         last_planet_position: Vec3::new(0., PLANET_SIZE.y * 2., 0.),
     });
+}
+
+// TODO: fix bug when new planet does not have obstacles.
+fn restart_game(
+    mut commands: Commands,
+    mut camera_query: Query<&mut Transform, With<Camera>>,
+    despawn_entities: Query<
+        Entity,
+        (
+            Or<(With<Planet>, With<Obstacle>, With<Player>)>,
+            (Without<Camera>, Without<ReplayButton>),
+        ),
+    >,
+) {
+    println!("Len: {}", despawn_entities.iter().len());
+    for entity_to_despawn in despawn_entities.iter() {
+        commands.entity(entity_to_despawn).despawn_recursive();
+    }
+
+    if let Ok(mut camera_transform) = camera_query.get_single_mut() {
+        camera_transform.translation = PLAYER_START_POSITION;
+    }
 }
 
 fn spawn_planet(
@@ -296,7 +355,6 @@ fn shrink_current_planet(
     }
 }
 
-// TODO:
 fn manage_planet_face(
     planet_query: Query<&Planet>,
     mut planet_face_query: Query<(&mut PlanetFace, &mut TextureAtlasSprite)>,
@@ -436,6 +494,7 @@ fn check_player_planet_collisions(
 }
 
 fn check_player_obstacle_collisions(
+    mut next_app_state: ResMut<NextState<AppState>>,
     mut player_query: Query<(&Collider, &mut Transform), (With<Player>, Without<Obstacle>)>,
     mut obstacle_query: Query<(&Collider, &Transform), With<Obstacle>>,
 ) {
@@ -467,6 +526,7 @@ fn check_player_obstacle_collisions(
             // If objects collided
             // TODO: player death
             if let Some(_) = collision {
+                next_app_state.set(AppState::GameOver);
                 println!("Game Over!");
             }
         }
@@ -488,15 +548,33 @@ fn spawn_obstacles(
         let mut rng = rand::thread_rng();
         let obstacles_num = rng.gen_range(1..5);
 
+        let mut last_obstacle_angle: f32 = 0.;
+
         for _ in 0..obstacles_num {
             // Random position on the planet.
-            // TODO: make angle unique for each obstacle and make more gaps btwn obstacles.
             let mut obstacle_position = Vec3::ZERO;
-            let angle = if rng.gen_bool(0.5) {
-                rng.gen_range(0f32..=45f32)
+            let mut angle = if rng.gen_bool(0.5) {
+                rng.gen_range(0f32..=OBSTACLE_MIN_ANGLE_GENERATION)
             } else {
-                rng.gen_range(125f32..360f32)
+                rng.gen_range(OBSTACLE_MAX_ANGLE_GENERATION..=2. * PI)
             };
+
+            if last_obstacle_angle != 0. {
+                if (angle - last_obstacle_angle).abs() < OBSTACLE_CLOSE_GAP_RANGE.1 {
+                    angle -= rng.gen_range(OBSTACLE_CLOSE_GAP_RANGE.0..OBSTACLE_CLOSE_GAP_RANGE.1);
+                } else if (angle - last_obstacle_angle).abs() < OBSTACLE_LONG_GAP_RANGE.1 {
+                    angle -= rng.gen_range(OBSTACLE_LONG_GAP_RANGE.0..OBSTACLE_LONG_GAP_RANGE.1);
+                }
+            }
+
+            angle = angle.clamp(OBSTACLE_MIN_ANGLE_GENERATION, OBSTACLE_MAX_ANGLE_GENERATION);
+
+            println!(
+                "Last angle | New angle: {} , {}",
+                last_obstacle_angle, angle
+            );
+
+            last_obstacle_angle = angle;
 
             let planet_radius = planet_struct.radius;
             let obstacle_radius = OBSTACLE_SIZE.y / 2.;
@@ -558,10 +636,12 @@ fn move_obstacles_on_planet(
 
                 obstacle_struct.angle -= time.delta_seconds() * OBSTACLE_MOVEMENT_SPEED;
 
-                if obstacle_struct.angle > 360. {
+                if obstacle_struct.angle.abs() > PI * 2. {
                     obstacle_struct.angle = 0.;
                 }
             }
         }
     }
 }
+
+// fn manage_game_over() {}
