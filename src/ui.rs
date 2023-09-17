@@ -69,67 +69,6 @@ impl Plugin for UIPlugin {
     }
 }
 
-// pub fn build_replay_button(mut commands: Commands, asset_server: Res<AssetServer>) {
-//     commands
-//         .spawn(NodeBundle {
-//             style: MAIN_HUD_STYLE,
-//             ..default()
-//         })
-//         .with_children(|parent| {
-//             // === Replay Button ===
-//             parent.spawn((
-//                 ButtonBundle {
-//                     style: BUTTON_STYLE,
-//                     image: asset_server.load("art/Replay.png").into(),
-//                     background_color: NORMAL_BUTTON_COLOR.into(),
-//                     visibility: Visibility::Hidden,
-//                     ..default()
-//                 },
-//                 ReplayButton {},
-//             ));
-//         });
-// }
-
-// pub fn build_score(mut commands: Commands, asset_server: Res<AssetServer>) {
-//     commands
-//         .spawn(NodeBundle {
-//             style: SCORE_HUD_STYLE,
-//             ..default()
-//         })
-//         .with_children(|parent| {
-//             // === Score text ===
-//             parent.spawn((
-//                 TextBundle {
-//                     style: Style {
-//                         margin: UiRect::new(Val::Px(8.0), Val::Px(0.0), Val::Px(4.0), Val::Px(0.0)),
-//                         ..default()
-//                     },
-//                     text: Text {
-//                         sections: vec![TextSection::new(
-//                             0.to_string(),
-//                             TextStyle {
-//                                 font: asset_server.load("fonts/Comic Sans MS.ttf"),
-//                                 font_size: 48.0,
-//                                 color: Color::WHITE,
-//                             },
-//                         )],
-//                         alignment: TextAlignment::Center,
-//                         ..default()
-//                     },
-//                     ..default()
-//                 },
-//                 ScoreText {},
-//             ));
-
-//             // === Score image ===
-//             parent.spawn(ImageBundle {
-//                 style: SCORE_IMAGE_STYLE,
-//                 image: asset_server.load("art/Score.png").into(),
-//                 ..default()
-//             });
-//         });
-// }
-
 fn build_hud(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands
         .spawn(NodeBundle {

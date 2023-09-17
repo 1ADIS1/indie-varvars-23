@@ -28,7 +28,7 @@ pub const PLANET_FACE_SIZE: Vec2 = Vec2::new(715., 715.);
 pub const PLANET_FACE_NORMAL_THRESHOLD: f32 = 250.;
 pub const PLANET_FACE_BAD_THRESHOLD: f32 = 175.;
 
-pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
+pub const OBSTACLE_SIZE: Vec2 = Vec2::new(64., 64.);
 pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
 pub const OBSTACLES_MAX_NUM: usize = 7;
 // 20 degrees - 45 degrees
@@ -57,8 +57,9 @@ pub struct AssetsLoading(Vec<HandleUntyped>);
 #[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub enum LoadingState {
     #[default]
-    Planet,
     None,
+    Planet,
+    Obstacles,
 }
 
 #[derive(States, Debug, Default, Clone, Eq, PartialEq, Hash)]
@@ -187,7 +188,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                spawn_planet.after(shrink_current_planet),
+                // spawn_planet.after(shrink_current_planet),
                 rotate_planets,
                 shrink_current_planet,
                 player_jump,
@@ -201,9 +202,13 @@ fn main() {
         )
         .add_systems(
             Update,
-            check_planets_loading.run_if(in_state(LoadingState::Planet)),
+            (
+                check_planets_loading.run_if(in_state(LoadingState::Planet)),
+                check_obstacles_loading.run_if(in_state(LoadingState::Obstacles)),
+            ),
         )
-        .add_systems(OnExit(LoadingState::Planet), spawn_obstacles)
+        .add_systems(OnEnter(LoadingState::Planet), spawn_planet)
+        .add_systems(OnEnter(LoadingState::Obstacles), spawn_obstacles)
         .add_systems(OnExit(AppState::GameOver), restart_game)
         .run();
 }
@@ -249,6 +254,7 @@ fn start_game(
     next_loading_state.set(LoadingState::Planet);
 }
 
+// TODO: fix bug with invisible obstacle after restart.
 fn restart_game(
     mut commands: Commands,
     mut camera_query: Query<&mut Transform, With<Camera>>,
@@ -390,11 +396,28 @@ fn check_planets_loading(
         == LoadState::Loaded
     {
         // all assets are now ready
-        next_loading_state.set(LoadingState::None);
+        next_loading_state.set(LoadingState::Obstacles);
 
         loading.0.clear();
 
         println!("Planet has spawned!");
+    }
+}
+
+fn check_obstacles_loading(
+    mut next_loading_state: ResMut<NextState<LoadingState>>,
+    mut loading: ResMut<AssetsLoading>,
+    asset_server: Res<AssetServer>,
+) {
+    if asset_server.get_group_load_state(loading.0.iter().map(|handle| handle.id()))
+        == LoadState::Loaded
+    {
+        // all assets are now ready
+        next_loading_state.set(LoadingState::None);
+
+        loading.0.clear();
+
+        println!("Obstacles has spawned!");
     }
 }
 
@@ -637,13 +660,15 @@ fn check_player_obstacle_collisions(
 }
 
 // When the new planet appears, it is filled with new obstacles.
-// TODO: SPRITE OF OBSTACLES ARE NOT APPEARING
+// TODO: SPRITES NOT THE SAME WITH THE PLAYER ARE LOADING TOO SLOW.
 fn spawn_obstacles(
     mut commands: Commands,
     mut planet_query: Query<(&Transform, &mut Planet)>,
+    mut loading: ResMut<AssetsLoading>,
     game_manager: Res<GameManager>,
     asset_server: Res<AssetServer>,
 ) {
+    let texture = asset_server.load("art/Wolf.png");
     println!(
         "Num of planets when spawning obstacles: {}",
         planet_query.iter().len()
@@ -702,24 +727,23 @@ fn spawn_obstacles(
                     .spawn((
                         SpriteBundle {
                             transform: Transform::from_translation(obstacle_position),
-                            texture: asset_server.load("art/ball.png"),
+                            texture: texture.clone(),
                             sprite: Sprite {
-                                color: Color::ORANGE,
                                 custom_size: Some(OBSTACLE_SIZE),
                                 ..default()
                             },
                             ..default()
                         },
                         Collider {
-                            shape: Ball::new(OBSTACLE_SIZE.y / 2.),
+                            shape: Ball::new(OBSTACLE_SIZE.y / 2. - 6.),
                         },
                         Obstacle { angle },
                     ))
                     .id(),
             );
-        }
 
-        println!("Obstacles have spawned!");
+            loading.0.push(texture.clone_untyped());
+        }
     }
 }
 
@@ -757,11 +781,7 @@ fn move_obstacles_on_planet(
     }
 }
 
-fn spawn_background(
-    mut commands: Commands,
-    // window_query: Query<&Window, With<PrimaryWindow>>,
-    asset_server: Res<AssetServer>,
-) {
+fn spawn_background(mut commands: Commands, asset_server: Res<AssetServer>) {
     let tween = Tween::new(
         EaseFunction::QuadraticInOut,
         Duration::from_secs(0),
