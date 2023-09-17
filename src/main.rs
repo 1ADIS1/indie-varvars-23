@@ -6,7 +6,6 @@ use bevy::{asset::LoadState, prelude::*, window::PresentMode};
 use bevy_tweening::{lens::TransformPositionLens, *};
 use parry2d::{
     math::Isometry,
-    na::ComplexField,
     query::contact,
     shape::{Ball, Shape},
 };
@@ -33,8 +32,8 @@ pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
 pub const OBSTACLE_CLOSE_GAP_RANGE: (f32, f32) = (0., 0.261799);
 // 40 degrees - 80 degrees
 pub const OBSTACLE_LONG_GAP_RANGE: (f32, f32) = (0.698132, 1.39626);
-// 150 degrees
-pub const OBSTACLE_MAX_ANGLE_GENERATION: f32 = 2.61799;
+// 180 degrees
+pub const OBSTACLE_MAX_ANGLE_GENERATION: f32 = PI;
 // 45 degrees
 pub const OBSTACLE_MIN_ANGLE_GENERATION: f32 = FRAC_PI_4;
 
@@ -72,9 +71,29 @@ struct Obstacle {
 
 #[derive(Component)]
 struct Planet {
+    variant: PlanetVariant,
     is_playing: bool,
     obstacles: Vec<Entity>,
     radius: f32,
+}
+
+#[derive(Clone, Copy)]
+pub enum PlanetVariant {
+    Earth = 0,
+    Venus,
+    Mars,
+    Mercury,
+}
+
+impl PlanetVariant {
+    fn next(self) -> PlanetVariant {
+        match self {
+            PlanetVariant::Earth => PlanetVariant::Venus,
+            PlanetVariant::Venus => PlanetVariant::Mars,
+            PlanetVariant::Mars => PlanetVariant::Mercury,
+            PlanetVariant::Mercury => PlanetVariant::Earth,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -90,6 +109,7 @@ pub struct Collider {
 
 #[derive(Event)]
 pub struct PlanetSpawnEvent {
+    planet_variant_to_spawn: PlanetVariant,
     last_planet_position: Vec3,
 }
 
@@ -175,6 +195,7 @@ fn spawn_2d_camera(mut commands: Commands) {
 
 fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
     planet_spawn_event_writer.send(PlanetSpawnEvent {
+        planet_variant_to_spawn: PlanetVariant::Earth,
         last_planet_position: Vec3::new(0., PLANET_SIZE.y * 2., 0.),
     });
 }
@@ -210,7 +231,12 @@ fn spawn_planet(
     asset_server: Res<AssetServer>,
 ) {
     for planet_spawn_event in planet_spawn_event_reader.iter() {
-        let texture = asset_server.load("art/Earth.png");
+        let texture = match planet_spawn_event.planet_variant_to_spawn {
+            PlanetVariant::Earth => asset_server.load("art/Earth.png"),
+            PlanetVariant::Mars => asset_server.load("art/Mars.png"),
+            PlanetVariant::Venus => asset_server.load("art/Venus.png"),
+            PlanetVariant::Mercury => asset_server.load("art/Mercury.png"),
+        };
 
         let mut new_planet_position = planet_spawn_event.last_planet_position;
         new_planet_position.y -= PLANET_SIZE.y * 2.;
@@ -231,6 +257,7 @@ fn spawn_planet(
                     ..default()
                 },
                 Planet {
+                    variant: planet_spawn_event.planet_variant_to_spawn,
                     is_playing: false,
                     obstacles: Vec::new(),
                     radius: PLANET_SIZE.y / 2.,
@@ -349,6 +376,7 @@ fn shrink_current_planet(
             next_loading_state.set(LoadingState::Planet);
 
             planet_spawn_event_writer.send(PlanetSpawnEvent {
+                planet_variant_to_spawn: planet_struct.variant.next(),
                 last_planet_position: transform.translation,
             });
         }
@@ -567,7 +595,7 @@ fn spawn_obstacles(
                 }
             }
 
-            angle = angle.clamp(OBSTACLE_MIN_ANGLE_GENERATION, OBSTACLE_MAX_ANGLE_GENERATION);
+            // angle = angle.clamp(0., OBSTACLE_MAX_ANGLE_GENERATION);
 
             println!(
                 "Last angle | New angle: {} , {}",
