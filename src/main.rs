@@ -2,7 +2,12 @@ mod ui;
 
 use std::{f32::consts::*, time::Duration};
 
-use bevy::{asset::LoadState, prelude::*, window::PresentMode};
+use bevy::{
+    asset::LoadState,
+    audio::{Volume, VolumeLevel},
+    prelude::*,
+    window::PresentMode,
+};
 use bevy_tweening::{lens::TransformPositionLens, *};
 use parry2d::{
     math::Isometry,
@@ -180,15 +185,11 @@ fn main() {
         .add_state::<AppState>()
         .init_resource::<AssetsLoading>()
         .init_resource::<GameManager>()
-        .add_systems(Startup, spawn_2d_camera)
-        .add_systems(
-            OnEnter(AppState::Playing),
-            (start_game, spawn_player, spawn_background),
-        )
+        .add_systems(Startup, (spawn_2d_camera, spawn_background))
+        .add_systems(OnEnter(AppState::Playing), (start_game, spawn_player))
         .add_systems(
             Update,
             (
-                // spawn_planet.after(shrink_current_planet),
                 rotate_planets,
                 shrink_current_planet,
                 player_jump,
@@ -209,7 +210,7 @@ fn main() {
         )
         .add_systems(OnEnter(LoadingState::Planet), spawn_planet)
         .add_systems(OnEnter(LoadingState::Obstacles), spawn_obstacles)
-        .add_systems(OnExit(AppState::GameOver), restart_game)
+        .add_systems(OnEnter(AppState::GameOver), restart_game)
         .run();
 }
 
@@ -244,6 +245,8 @@ fn start_game(
     mut next_loading_state: ResMut<NextState<LoadingState>>,
     mut game_manager: ResMut<GameManager>,
 ) {
+    next_loading_state.set(LoadingState::Planet);
+
     game_manager.infinite_mode = false;
     game_manager.score = 0;
 
@@ -251,18 +254,23 @@ fn start_game(
         planet_variant_to_spawn: PlanetVariant::Earth,
         last_planet_position: Vec3::new(0., PLANET_SIZE.y * 2., 0.),
     });
-    next_loading_state.set(LoadingState::Planet);
 }
 
 // TODO: fix bug with invisible obstacle after restart.
 fn restart_game(
     mut commands: Commands,
     mut camera_query: Query<&mut Transform, With<Camera>>,
+    mut background_query: Query<&mut Transform, (With<Background>, Without<Camera>)>,
     despawn_entities: Query<
         Entity,
         (
-            Or<(With<Planet>, With<Obstacle>, With<Player>, With<Background>)>,
-            (Without<Camera>, Without<ReplayButton>, Without<ScoreText>),
+            Or<(With<Planet>, With<Obstacle>, With<Player>)>,
+            (
+                Without<Camera>,
+                Without<ReplayButton>,
+                Without<ScoreText>,
+                Without<Background>,
+            ),
         ),
     >,
 ) {
@@ -273,6 +281,10 @@ fn restart_game(
 
     if let Ok(mut camera_transform) = camera_query.get_single_mut() {
         camera_transform.translation = PLAYER_START_POSITION;
+    }
+
+    if let Ok(mut background_transform) = background_query.get_single_mut() {
+        background_transform.translation.y = PLAYER_START_POSITION.y;
     }
 }
 
@@ -530,8 +542,10 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 fn player_jump(
     mut player_query: Query<(&mut Transform, &mut Player)>,
+    mut commands: Commands,
     keyboard_input: Res<Input<KeyCode>>,
     time: Res<Time>,
+    asset_server: Res<AssetServer>,
 ) {
     if let Ok((mut player_transform, mut player_struct)) = player_query.get_single_mut() {
         if player_struct.is_grounded {
@@ -542,6 +556,16 @@ fn player_jump(
 
         if keyboard_input.just_pressed(KeyCode::Space) && player_struct.is_grounded {
             player_struct.velocity = PLAYER_JUMP_STRENGTH;
+
+            // Play jump sound
+            commands.spawn(AudioBundle {
+                source: asset_server.load("sounds/350905__cabled_mess__jump_c_05.ogg"),
+                settings: PlaybackSettings {
+                    mode: bevy::audio::PlaybackMode::Despawn,
+                    ..default()
+                },
+                ..default()
+            });
         }
 
         // accelerate fall
@@ -782,6 +806,16 @@ fn move_obstacles_on_planet(
 }
 
 fn spawn_background(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn(AudioBundle {
+        source: asset_server.load("sounds/2021-10-19_-_Funny_Bit_-_www.FesliyanStudios.com.ogg"),
+        settings: PlaybackSettings {
+            mode: bevy::audio::PlaybackMode::Loop,
+            volume: Volume::Absolute(VolumeLevel::new(0.25)),
+            ..default()
+        },
+        ..default()
+    });
+
     let tween = Tween::new(
         EaseFunction::QuadraticInOut,
         Duration::from_secs(0),
