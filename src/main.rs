@@ -10,12 +10,14 @@ use parry2d::{
     shape::{Ball, Shape},
 };
 use rand::Rng;
-use ui::{ReplayButton, UIPlugin};
+use ui::{ReplayButton, ScoreText, UIPlugin};
 
 pub const PLAYER_MOVEMENT_SPEED: f32 = 200.;
 pub const PLAYER_JUMP_STRENGTH: f32 = 450.;
 pub const GRAVITY_STRENGTH: f32 = -27.43;
 pub const PLAYER_FALL_ACCELERATION: f32 = -3000.;
+pub const PLAYER_START_POSITION: Vec3 = Vec3::new(0., PLANET_SIZE.y, 0.);
+pub const PLAYER_SIZE: Vec2 = Vec2::new(64., 64.);
 
 pub const PLANET_SIZE: Vec2 = Vec2::new(715., 715.);
 pub const PLANET_ROTATION_SPEED: f32 = 1.;
@@ -28,6 +30,7 @@ pub const PLANET_FACE_BAD_THRESHOLD: f32 = 175.;
 
 pub const OBSTACLE_SIZE: Vec2 = Vec2::new(48., 48.);
 pub const OBSTACLE_MOVEMENT_SPEED: f32 = 2.;
+pub const OBSTACLES_MAX_NUM: usize = 7;
 // 20 degrees - 45 degrees
 pub const OBSTACLE_CLOSE_GAP_RANGE: (f32, f32) = (0., 0.261799);
 // 40 degrees - 80 degrees
@@ -37,7 +40,14 @@ pub const OBSTACLE_MAX_ANGLE_GENERATION: f32 = PI;
 // 45 degrees
 pub const OBSTACLE_MIN_ANGLE_GENERATION: f32 = FRAC_PI_4;
 
-pub const PLAYER_START_POSITION: Vec3 = Vec3::new(0., PLANET_SIZE.y, 0.);
+pub const BACKGROUND_SIZE: Vec2 = Vec2::new(1000., 1000.);
+pub const BACKGROUND_SPEED: f32 = 100.;
+
+#[derive(Resource, Default)]
+struct GameManager {
+    infinite_mode: bool,
+    score: usize,
+}
 
 /// Resource for tracking loading assets.
 #[derive(Resource, Default)]
@@ -77,7 +87,7 @@ struct Planet {
     radius: f32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum PlanetVariant {
     Earth = 0,
     Venus,
@@ -94,7 +104,34 @@ impl PlanetVariant {
             PlanetVariant::Mercury => PlanetVariant::Earth,
         }
     }
+
+    // For story mode
+    fn get_obstacles(self) -> Vec<f32> {
+        let mut angles = Vec::new();
+        match self {
+            PlanetVariant::Earth => {
+                angles.extend([0.]);
+            }
+            PlanetVariant::Venus => {
+                angles.extend([0., PI]);
+            }
+            PlanetVariant::Mars => {
+                angles.extend([
+                    290f32.to_radians(),
+                    270f32.to_radians(),
+                    250f32.to_radians(),
+                ]);
+            }
+            PlanetVariant::Mercury => {
+                angles.extend([PI, 30f32.to_radians(), 0., 330f32.to_radians()]);
+            }
+        };
+        return angles;
+    }
 }
+
+#[derive(Component)]
+struct Background;
 
 #[derive(Component)]
 struct PlanetFace {
@@ -141,8 +178,12 @@ fn main() {
         .add_state::<LoadingState>()
         .add_state::<AppState>()
         .init_resource::<AssetsLoading>()
+        .init_resource::<GameManager>()
         .add_systems(Startup, spawn_2d_camera)
-        .add_systems(OnEnter(AppState::Playing), (start_game, spawn_player))
+        .add_systems(
+            OnEnter(AppState::Playing),
+            (start_game, spawn_player, spawn_background),
+        )
         .add_systems(
             Update,
             (
@@ -163,7 +204,7 @@ fn main() {
             check_planets_loading.run_if(in_state(LoadingState::Planet)),
         )
         .add_systems(OnExit(LoadingState::Planet), spawn_obstacles)
-        .add_systems(OnEnter(AppState::GameOver), restart_game)
+        .add_systems(OnExit(AppState::GameOver), restart_game)
         .run();
 }
 
@@ -193,22 +234,29 @@ fn spawn_2d_camera(mut commands: Commands) {
     ));
 }
 
-fn start_game(mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>) {
+fn start_game(
+    mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>,
+    mut next_loading_state: ResMut<NextState<LoadingState>>,
+    mut game_manager: ResMut<GameManager>,
+) {
+    game_manager.infinite_mode = false;
+    game_manager.score = 0;
+
     planet_spawn_event_writer.send(PlanetSpawnEvent {
         planet_variant_to_spawn: PlanetVariant::Earth,
         last_planet_position: Vec3::new(0., PLANET_SIZE.y * 2., 0.),
     });
+    next_loading_state.set(LoadingState::Planet);
 }
 
-// TODO: fix bug when new planet does not have obstacles.
 fn restart_game(
     mut commands: Commands,
     mut camera_query: Query<&mut Transform, With<Camera>>,
     despawn_entities: Query<
         Entity,
         (
-            Or<(With<Planet>, With<Obstacle>, With<Player>)>,
-            (Without<Camera>, Without<ReplayButton>),
+            Or<(With<Planet>, With<Obstacle>, With<Player>, With<Background>)>,
+            (Without<Camera>, Without<ReplayButton>, Without<ScoreText>),
         ),
     >,
 ) {
@@ -228,6 +276,10 @@ fn spawn_planet(
     mut camera_query: Query<(&Transform, &mut Animator<Transform>), With<Camera>>,
     mut loading: ResMut<AssetsLoading>,
     mut texture_atlases: ResMut<Assets<TextureAtlas>>,
+    mut background_query: Query<
+        (&mut Animator<Transform>, &Transform),
+        (With<Background>, Without<Camera>),
+    >,
     asset_server: Res<AssetServer>,
 ) {
     for planet_spawn_event in planet_spawn_event_reader.iter() {
@@ -312,6 +364,20 @@ fn spawn_planet(
 
             camera_animator.set_tweenable(tween);
         }
+
+        // Tween background position
+        if let Ok((mut background_animator, bg_transform)) = background_query.get_single_mut() {
+            let tween = Tween::new(
+                EaseFunction::QuadraticInOut,
+                Duration::from_secs_f32(1.2),
+                TransformPositionLens {
+                    start: bg_transform.translation,
+                    end: Vec3::new(0., new_planet_position.y, bg_transform.translation.z),
+                },
+            );
+
+            background_animator.set_tweenable(tween);
+        }
     }
 }
 
@@ -348,6 +414,7 @@ fn shrink_current_planet(
     mut planets_query: Query<(&mut Sprite, Entity, &mut Collider, &Transform, &mut Planet)>,
     mut planet_spawn_event_writer: EventWriter<PlanetSpawnEvent>,
     mut next_loading_state: ResMut<NextState<LoadingState>>,
+    mut game_manager: ResMut<GameManager>,
     time: Res<Time>,
 ) {
     for (mut planet_sprite, planet_entity, mut collider, transform, mut planet_struct) in
@@ -379,6 +446,12 @@ fn shrink_current_planet(
                 planet_variant_to_spawn: planet_struct.variant.next(),
                 last_planet_position: transform.translation,
             });
+
+            if planet_struct.variant.next() == PlanetVariant::Earth {
+                game_manager.infinite_mode = true;
+            }
+
+            game_manager.score += 1;
         }
     }
 }
@@ -410,13 +483,13 @@ fn manage_planet_face(
 }
 
 fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let collider_shape = Ball::new(32.);
+    let collider_shape = Ball::new(PLAYER_SIZE.y / 2. - 4.);
 
     commands.spawn((
         SpriteBundle {
-            texture: asset_server.load("art/ball.png"),
+            texture: asset_server.load("art/Piggy.png"),
             sprite: Sprite {
-                color: Color::GREEN,
+                custom_size: Some(PLAYER_SIZE),
                 ..default()
             },
             transform: Transform::from_translation(PLAYER_START_POSITION),
@@ -432,13 +505,16 @@ fn spawn_player(mut commands: Commands, asset_server: Res<AssetServer>) {
     ));
 }
 
-// TODO: players falls over the planet when pressing S.
 fn player_jump(
     mut player_query: Query<(&mut Transform, &mut Player)>,
     keyboard_input: Res<Input<KeyCode>>,
     time: Res<Time>,
 ) {
     if let Ok((mut player_transform, mut player_struct)) = player_query.get_single_mut() {
+        if player_struct.is_grounded {
+            player_struct.velocity = 0.;
+        }
+
         player_struct.velocity += GRAVITY_STRENGTH * GRAVITY_STRENGTH.abs() * time.delta_seconds();
 
         if keyboard_input.just_pressed(KeyCode::Space) && player_struct.is_grounded {
@@ -552,19 +628,20 @@ fn check_player_obstacle_collisions(
             .unwrap();
 
             // If objects collided
-            // TODO: player death
             if let Some(_) = collision {
+                println!("Player has collided with obstacle!");
                 next_app_state.set(AppState::GameOver);
-                println!("Game Over!");
             }
         }
     }
 }
 
 // When the new planet appears, it is filled with new obstacles.
+// TODO: SPRITE OF OBSTACLES ARE NOT APPEARING
 fn spawn_obstacles(
     mut commands: Commands,
     mut planet_query: Query<(&Transform, &mut Planet)>,
+    game_manager: Res<GameManager>,
     asset_server: Res<AssetServer>,
 ) {
     println!(
@@ -574,11 +651,15 @@ fn spawn_obstacles(
 
     if let Ok((planet_transform, mut planet_struct)) = planet_query.get_single_mut() {
         let mut rng = rand::thread_rng();
-        let obstacles_num = rng.gen_range(1..5);
+        let mut obstacles_num = rng.gen_range(1..=OBSTACLES_MAX_NUM);
 
         let mut last_obstacle_angle: f32 = 0.;
 
-        for _ in 0..obstacles_num {
+        if !game_manager.infinite_mode {
+            obstacles_num = planet_struct.variant.get_obstacles().len();
+        }
+
+        for i in 0..obstacles_num {
             // Random position on the planet.
             let mut obstacle_position = Vec3::ZERO;
             let mut angle = if rng.gen_bool(0.5) {
@@ -603,6 +684,10 @@ fn spawn_obstacles(
             );
 
             last_obstacle_angle = angle;
+
+            if !game_manager.infinite_mode {
+                angle = planet_struct.variant.get_obstacles()[i];
+            }
 
             let planet_radius = planet_struct.radius;
             let obstacle_radius = OBSTACLE_SIZE.y / 2.;
@@ -672,4 +757,27 @@ fn move_obstacles_on_planet(
     }
 }
 
-// fn manage_game_over() {}
+fn spawn_background(
+    mut commands: Commands,
+    // window_query: Query<&Window, With<PrimaryWindow>>,
+    asset_server: Res<AssetServer>,
+) {
+    let tween = Tween::new(
+        EaseFunction::QuadraticInOut,
+        Duration::from_secs(0),
+        TransformPositionLens {
+            start: Vec3::ZERO,
+            end: Vec3::ZERO,
+        },
+    );
+
+    commands.spawn((
+        SpriteBundle {
+            transform: Transform::from_xyz(0., PLAYER_START_POSITION.y, -10.),
+            texture: asset_server.load("art/BG.png"),
+            ..default()
+        },
+        Background,
+        Animator::new(tween),
+    ));
+}
