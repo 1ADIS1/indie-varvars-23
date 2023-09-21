@@ -99,6 +99,9 @@ pub enum PlanetVariant {
     Venus,
     Mars,
     Mercury,
+    Jupiter,
+    Neptune,
+    Uran,
 }
 
 impl PlanetVariant {
@@ -107,7 +110,10 @@ impl PlanetVariant {
             PlanetVariant::Earth => PlanetVariant::Venus,
             PlanetVariant::Venus => PlanetVariant::Mars,
             PlanetVariant::Mars => PlanetVariant::Mercury,
-            PlanetVariant::Mercury => PlanetVariant::Earth,
+            PlanetVariant::Mercury => PlanetVariant::Jupiter,
+            PlanetVariant::Jupiter => PlanetVariant::Neptune,
+            PlanetVariant::Neptune => PlanetVariant::Uran,
+            PlanetVariant::Uran => PlanetVariant::Earth,
         }
     }
 
@@ -130,6 +136,22 @@ impl PlanetVariant {
             }
             PlanetVariant::Mercury => {
                 angles.extend([PI, 30f32.to_radians(), 0., 330f32.to_radians()]);
+            }
+            PlanetVariant::Jupiter => {
+                angles.extend([FRAC_PI_6, 150f32.to_radians(), 270f32.to_radians()]);
+            }
+            PlanetVariant::Neptune => {
+                angles.extend([
+                    FRAC_PI_4,
+                    FRAC_PI_6,
+                    15f32.to_radians(),
+                    240f32.to_radians(),
+                    225f32.to_radians(),
+                    210f32.to_radians(),
+                ]);
+            }
+            PlanetVariant::Uran => {
+                angles.extend([PI, 225f32.to_radians(), 315f32.to_radians(), 0.]);
             }
         };
         return angles;
@@ -192,9 +214,11 @@ fn main() {
             (
                 rotate_planets,
                 shrink_current_planet,
-                player_jump,
+                player_jump.run_if(in_state(LoadingState::None)),
                 show_gizmos,
-                check_player_planet_collisions.after(player_jump),
+                check_player_planet_collisions
+                    .after(player_jump)
+                    .run_if(in_state(LoadingState::None)),
                 move_obstacles_on_planet,
                 check_player_obstacle_collisions,
                 manage_planet_face,
@@ -306,6 +330,9 @@ fn spawn_planet(
             PlanetVariant::Mars => asset_server.load("art/Mars.png"),
             PlanetVariant::Venus => asset_server.load("art/Venus.png"),
             PlanetVariant::Mercury => asset_server.load("art/Mercury.png"),
+            PlanetVariant::Jupiter => asset_server.load("art/Jupiter.png"),
+            PlanetVariant::Neptune => asset_server.load("art/Neptune.png"),
+            PlanetVariant::Uran => asset_server.load("art/Uran.png"),
         };
 
         let mut new_planet_position = planet_spawn_event.last_planet_position;
